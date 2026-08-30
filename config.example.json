@@ -1,0 +1,29 @@
+{
+  "midi_port": "X-TOUCH MINI",
+  "layers": {
+    "A": {
+      "fader": { "mode": "windows" },
+      "encoders": {
+        "1": { "mode": "sonar", "channel": "game" },
+        "2": { "mode": "sonar", "channel": "chatRender" },
+        "3": { "mode": "sonar", "channel": "media" },
+        "4": { "mode": "sonar", "channel": "aux" },
+        "5": { "mode": "sonar", "channel": "chatCapture" },
+        "6": { "mode": "app", "process": "spotify.exe" },
+        "8": { "mode": "hotkey", "cw": "f17", "ccw": "f18" }
+      },
+      "buttons": {
+        "18": { "action": "prev" },
+        "22": { "action": "play_pause" },
+        "19": { "action": "next" },
+        "21": { "action": "stop" },
+        "23": { "action": "mute", "led": { "mode": "on" } }
+      }
+    },
+    "B": {
+      "fader": { "mode": "off" },
+      "encoders": {},
+      "buttons": {}
+    }
+  }
+}

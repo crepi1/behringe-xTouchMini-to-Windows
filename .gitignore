@@ -1,0 +1,8 @@
+# Build-Artefakte
+build/
+dist/
+__pycache__/
+*.spec
+
+# Persoenliche Konfiguration (Beispiel: config.example.json)
+config.json
