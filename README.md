@@ -136,8 +136,13 @@ Format wird automatisch migriert.
 | Untere Button-Reihe | Noten 16–23 | Noten 40–47 |
 | Fader | CC 9 | CC 10 |
 
-LED-Steuerung (Richtung PC → Gerät): Note-On mit Velocity **0** = aus,
-**1** = an, **2** = blinken. Encoder-LED-Ringe folgen empfangenen CC-Werten.
+LED-Steuerung (Richtung PC → Gerät): Note-On auf **Kanal 11** mit dem
+**Tasten-Index 0–15** als Note (0–7 = obere Reihe, 8–15 = untere Reihe —
+**nicht** die Sende-Notennummern!), Velocity **0** = aus, **1** = an,
+**2** = blinken. Da es nur 16 physische LEDs gibt, zeigt die App immer die
+LED-Belegung des zuletzt am Gerät benutzten Layers. Achtung: Unter Windows
+heißt der MIDI-Eingang z. B. `X-TOUCH MINI 0`, der Ausgang aber
+`X-TOUCH MINI 1` — die App sucht beide getrennt per Teilstring.
 
 ## Technische Details
 
@@ -153,11 +158,14 @@ LED-Steuerung (Richtung PC → Gerät): Note-On mit Velocity **0** = aus,
   (`AudioUtilities.GetAllSessions()` → `SimpleAudioVolume`).
 - **Tastenemulation**: `keybd_event` mit Virtual-Key-Codes (Medientasten
   `0xAD–0xB3`, F13–F24 `0x7C–0x87`).
-- **Hotkey-Encoder-Trick**: Da die Encoder absolute Werte senden, setzt die App
-  den Encoder nach jedem Ereignis per MIDI-Rückkanal auf Mittelstellung (64)
-  zurück. Jede Raststufe erzeugt so ein Delta (±1…n) und damit Richtung +
-  Anzahl der Tastendrücke — endlos drehbar in beide Richtungen, ohne an den
-  Enden 0/127 hängenzubleiben.
+- **Hotkey-Encoder**: Da die Encoder absolute Werte senden, wird die Richtung
+  aus dem Delta zum letzten Wert bestimmt (±1…n pro Ereignis = Anzahl der
+  Tastendrücke). Am Anschlag sendet der X-Touch Mini bei jeder weiteren
+  Raststufe denselben Wert erneut — jede Wiederholung von **0** zählt als
+  Klick gegen den, jede Wiederholung von **127** als Klick im Uhrzeigersinn.
+  Dadurch ist der Modus endlos drehbar. (Empfangene CC-Werte übernimmt das
+  Gerät übrigens *nicht* als neuen Encoder-Stand — ein „Reset per Rückkanal"
+  funktioniert nicht.)
 - **Drossel**: Schnelle Dreh-/Faderbewegungen werden koalesziert (nur der
   jeweils letzte Wert wird gesetzt, max. alle 40 ms pro Ziel), damit weder die
   Sonar-HTTP-API noch die Audio-API geflutet wird.

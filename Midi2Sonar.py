@@ -45,7 +45,9 @@ else:
 CONFIG_PATH = BASE_DIR / "config.json"
 COREPROPS = Path(r"C:\ProgramData\SteelSeries\SteelSeries Engine 3\coreProps.json")
 
-MIDI_CHANNEL = 10  # X-Touch Mini Standard-Modus: MIDI-Kanal 11 (0-basiert 10)
+MIDI_CHANNEL = 10  # X-Touch Mini Standard-Modus: sendet auf MIDI-Kanal 11 (0-basiert 10)
+LED_CHANNEL = 10   # Button-LEDs empfangen auf Kanal 11, Noten 0-15 = Tasten-Index
+                   # (0-7 obere Reihe, 8-15 untere Reihe) - empirisch ermittelt
 
 # X-Touch Mini Standard-Modus: zwei Layer mit getrennten CC-/Notennummern
 LAYERS = {
@@ -68,6 +70,19 @@ LAYERS = {
 
 def layer_of_note(note: int):
     return "A" if note < 24 else ("B" if note < 48 else None)
+
+
+def led_index_of_note(note: int):
+    """Sende-Note eines Buttons -> physischer LED-Index 0-15 (None = keine LED)."""
+    layer = layer_of_note(note)
+    if layer is None:
+        return None
+    L = LAYERS[layer]
+    if note in L["top_notes"]:
+        return L["top_notes"].index(note)          # 0-7
+    if note in L["bot_notes"]:
+        return 8 + L["bot_notes"].index(note)      # 8-15
+    return None  # Encoder-Push hat keine Button-LED
 
 
 def classify_cc(cc: int):
@@ -378,6 +393,7 @@ class MidiBridge(threading.Thread):
         self.lock = threading.Lock()
         self.connected = False
         self.enabled = True                     # globales Play/Pause
+        self.active_layer = "A"                 # am Geraet zuletzt benutzter Layer
         self.win_vol = WindowsVolume()
         self.sonar = Sonar()
         self.app_vol = AppVolume()
@@ -395,51 +411,55 @@ class MidiBridge(threading.Thread):
         return self.cfg["layers"][layer]
 
     def set_led(self, note: int, state: int):
-        """state: 0=aus, 1=an, 2=blinken"""
-        if self._out is not None:
-            try:
-                self._out.send(mido.Message(
-                    "note_on", channel=MIDI_CHANNEL, note=note, velocity=state))
-            except Exception:
-                pass
-
-    def _send_cc(self, cc: int, value: int):
-        if self._out is not None:
-            try:
-                self._out.send(mido.Message(
-                    "control_change", channel=MIDI_CHANNEL, control=cc, value=value))
-            except Exception:
-                pass
+        """note = Sende-Note des Buttons; state: 0=aus, 1=an, 2=blinken"""
+        idx = led_index_of_note(note)
+        if idx is None or self._out is None:
+            return
+        try:
+            self._out.send(mido.Message(
+                "note_on", channel=LED_CHANNEL, note=idx, velocity=state))
+        except Exception:
+            pass
 
     def apply_leds(self, running_procs=None):
+        """LED-Zustaende des aktiven Layers senden (16 physische LEDs)."""
         with self.lock:
-            buttons = {}
-            for name in ("A", "B"):
-                buttons.update(self.layer_cfg(name).get("buttons", {}))
+            layer = self.active_layer
+            buttons = dict(self.layer_cfg(layer).get("buttons", {}))
+        states = {}
         for note_s, b in buttons.items():
+            idx = led_index_of_note(int(note_s))
+            if idx is None:
+                continue
             led = b.get("led", {"mode": "off"})
             mode = led.get("mode", "off")
             if mode == "on":
-                state = 1
+                states[idx] = 1
             elif mode == "blink":
-                state = 2
+                states[idx] = 2
             elif mode == "process":
                 proc = led.get("process", "").lower()
-                state = 1 if (running_procs is not None and proc in running_procs) else 0
+                states[idx] = 1 if (running_procs is not None and proc in running_procs) else 0
             else:
-                state = 0
-            self.set_led(int(note_s), state)
+                states[idx] = 0
+        if self._out is None:
+            return
+        for idx in range(16):
+            try:
+                self._out.send(mido.Message(
+                    "note_on", channel=LED_CHANNEL, note=idx,
+                    velocity=states.get(idx, 0)))
+            except Exception:
+                pass
+
+    def _set_active_layer(self, layer: str):
+        if layer != self.active_layer:
+            self.active_layer = layer
+            self.apply_leds()
 
     def reset_hotkey_encoders(self):
-        with self.lock:
-            pairs = []
-            for name in ("A", "B"):
-                for cc_s, e in self.layer_cfg(name).get("encoders", {}).items():
-                    if e.get("mode") == "hotkey":
-                        pairs.append(int(cc_s))
-        for cc in pairs:
-            self._send_cc(cc, 64)
-            self._enc_state[cc] = 64
+        # Richtungs-Erkennung neu initialisieren (z. B. nach Umkonfiguration)
+        self._enc_state = {}
 
     # ------------------------------------------------------------------- Loop
 
@@ -448,9 +468,11 @@ class MidiBridge(threading.Thread):
             try:
                 port_name = self._find_port()
                 try:
-                    self._out = mido.open_output(port_name)
-                except Exception:
+                    self._out = mido.open_output(self._find_out_port())
+                except Exception as e:
                     self._out = None
+                    self._emit("log", "err",
+                               f"MIDI-Ausgang nicht gefunden – LEDs deaktiviert ({e})")
                 with mido.open_input(port_name) as port:
                     self.connected = True
                     self._emit("log", "info", f"Verbunden mit: {port_name}")
@@ -481,6 +503,15 @@ class MidiBridge(threading.Thread):
                 return name
         raise RuntimeError(f"'{wanted}' nicht gefunden")
 
+    def _find_out_port(self) -> str:
+        # Windows nummeriert Ausgaenge anders als Eingaenge
+        # (z. B. Eingang "X-TOUCH MINI 0", Ausgang "X-TOUCH MINI 1")
+        wanted = self.cfg.get("midi_port", "")
+        for name in mido.get_output_names():
+            if wanted.lower() in name.lower():
+                return name
+        raise RuntimeError(f"Ausgang '{wanted}' nicht gefunden")
+
     # ------------------------------------------------------------ Verarbeitung
 
     def _handle(self, msg):
@@ -503,6 +534,7 @@ class MidiBridge(threading.Thread):
             self._emit("log", "unmap", f"CC{cc} = {value}  →  (unbekannt)")
             return
         what, layer = kind
+        self._set_active_layer(layer)
 
         if what == "fader":
             self._emit("fader", layer, value)
@@ -523,14 +555,19 @@ class MidiBridge(threading.Thread):
 
         mode = enc["mode"]
         if mode == "hotkey":
-            last = self._enc_state.get(cc, 64)
-            delta = value - last
-            self._send_cc(cc, 64)
-            self._enc_state[cc] = 64
+            # Absolute Werte -> Richtung aus dem Delta; am Anschlag (0/127)
+            # sendet das Geraet bei jedem Klick denselben Wert erneut.
+            last = self._enc_state.get(cc)
+            self._enc_state[cc] = value
+            if last is None or value == last:
+                delta = -1 if value == 0 else (1 if value == 127 else 0)
+                times = 1
+            else:
+                delta = value - last
+                times = min(abs(delta), 5)
             if delta == 0:
                 return
             action = enc.get("cw" if delta > 0 else "ccw", "none")
-            times = min(abs(delta), 5)
             direction = "↻" if delta > 0 else "↺"
             if not self.enabled:
                 self._paused_log(f"[{layer}] Encoder CC{cc} {direction}")
@@ -577,6 +614,7 @@ class MidiBridge(threading.Thread):
         if layer is None:
             self._emit("log", "unmap", f"Note {note}  →  (unbekannt)")
             return
+        self._set_active_layer(layer)
         with self.lock:
             b = self.layer_cfg(layer).get("buttons", {}).get(str(note))
         action = (b or {}).get("action", "none")
@@ -600,16 +638,21 @@ class ProcessWatcher(threading.Thread):
         super().__init__(daemon=True)
         self.bridge = bridge
         self._last = {}
+        self._last_layer = None
 
     def run(self):
         while True:
             try:
                 with self.bridge.lock:
-                    watched = {}
-                    for name in ("A", "B"):
-                        for n, b in self.bridge.layer_cfg(name).get("buttons", {}).items():
-                            if b.get("led", {}).get("mode") == "process":
-                                watched[int(n)] = b["led"].get("process", "").lower()
+                    layer = self.bridge.active_layer
+                    watched = {
+                        int(n): b["led"].get("process", "").lower()
+                        for n, b in self.bridge.layer_cfg(layer).get("buttons", {}).items()
+                        if b.get("led", {}).get("mode") == "process"
+                    }
+                if layer != self._last_layer:
+                    self._last_layer = layer
+                    self._last = {}
                 if watched and self.bridge.connected:
                     running = {p.info["name"].lower()
                                for p in psutil.process_iter(["name"]) if p.info["name"]}
