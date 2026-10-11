@@ -470,6 +470,7 @@ DEFAULT_SONAR_ENCODERS = {
 
 DEFAULT_CONFIG = {
     "midi_port": "X-TOUCH MINI",
+    "release_apps": [],
     "layers": {
         "A": {
             "fader": {"mode": "windows"},
@@ -516,6 +517,7 @@ def _migrate(cfg: dict) -> dict:
     notes = mc.setdefault("notes", json.loads(json.dumps(MC_DEFAULT_NOTES)))
     for k, v in MC_DEFAULT_NOTES.items():
         notes.setdefault(k, list(v))
+    cfg.setdefault("release_apps", [])
     return cfg
 
 
@@ -536,6 +538,10 @@ def save_config(cfg: dict) -> None:
 
 # ------------------------------------------------------------------ MIDI-Loop
 
+class _Released(Exception):
+    """Internes Signal: MIDI-Ports fuer ein anderes Programm freigeben."""
+
+
 class MidiBridge(threading.Thread):
     """Hintergrund-Thread: verbindet sich (und re-connectet) mit dem Controller.
     Erkennt Standard- vs. MC-Modus automatisch am MIDI-Kanal der Nachrichten."""
@@ -547,6 +553,8 @@ class MidiBridge(threading.Thread):
         self.lock = threading.Lock()
         self.connected = False
         self.enabled = True                     # globales Play/Pause
+        self.release_for = None                 # Prozessname -> Ports freigeben
+        self.released = False                   # Ports sind aktuell freigegeben
         self.active_layer = "A"                 # Standard-Modus: aktiver Layer
         self.hw_mode = "standard"               # "standard" | "mc"
         self.mc_learn = False                   # naechste MC-Note geht an die GUI
@@ -665,8 +673,31 @@ class MidiBridge(threading.Thread):
 
     # ------------------------------------------------------------------- Loop
 
+    def _close_out(self):
+        if self._out is not None:
+            try:
+                self._out.close()
+            except Exception:
+                pass
+            self._out = None
+
     def run(self):
         while True:
+            # MIDI-Freigabe: solange ein eingetragenes Programm (z. B. eine DAW)
+            # laeuft, bleiben die Ports geschlossen, damit es den Controller
+            # selbst benutzen kann. Windows gibt ein MIDI-Geraet nur an EIN
+            # Programm - deshalb reicht Ignorieren nicht, wir muessen loslassen.
+            if self.release_for:
+                if not self.released:
+                    self.released = True
+                    self._emit("log", "info",
+                               f"MIDI-Gerät freigegeben für {self.release_for} – "
+                               "Steuerung ruht, bis das Programm beendet ist")
+                time.sleep(1)
+                continue
+            if self.released:
+                self.released = False
+                self._emit("log", "info", "MIDI-Freigabe beendet – verbinde neu …")
             try:
                 port_name = self._find_port()
                 try:
@@ -686,6 +717,8 @@ class MidiBridge(threading.Thread):
                     # Port noch existiert, und sonst neu verbinden.
                     last_check = time.time()
                     while True:
+                        if self.release_for:
+                            raise _Released()
                         msg = port.poll()
                         if msg is None:
                             time.sleep(0.004)
@@ -699,16 +732,14 @@ class MidiBridge(threading.Thread):
                             self._handle(msg)
                         except Exception as e:
                             self._emit("log", "err", str(e))
+            except _Released:
+                self.connected = False
+                self._close_out()
             except Exception as e:
                 if self.connected:
                     self._emit("log", "err", f"MIDI: {e} – neuer Versuch in 3 s")
                 self.connected = False
-                if self._out is not None:
-                    try:
-                        self._out.close()
-                    except Exception:
-                        pass
-                    self._out = None
+                self._close_out()
                 time.sleep(3)
 
     def _find_port(self) -> str:
@@ -991,9 +1022,8 @@ class BackgroundSync(threading.Thread):
 
     def _tick(self):
         br = self.bridge
-        if not br.connected:
-            return
         with br.lock:
+            release_apps = list(br.cfg.get("release_apps", []))
             mode = br.hw_mode
             layer = br.active_layer
             if mode == "mc":
@@ -1003,17 +1033,31 @@ class BackgroundSync(threading.Thread):
                 buttons = dict(br.layer_cfg(layer).get("buttons", {}))
                 encoders = {}
 
+        watched = {int(n): b["led"].get("process", "").lower()
+                   for n, b in buttons.items()
+                   if b.get("led", {}).get("mode") == "process"}
+
+        running = None
+        if release_apps or watched:
+            running = {p.info["name"].lower()
+                       for p in psutil.process_iter(["name"]) if p.info["name"]}
+
+        # --- MIDI-Freigabe: laeuft eines der eingetragenen Programme?
+        if release_apps:
+            br.release_for = next(
+                (a for a in release_apps if a.lower() in running), None)
+        else:
+            br.release_for = None
+
+        if not br.connected:
+            return
+
         if (mode, layer) != self._last_key:
             self._last_key = (mode, layer)
             self._last = {}
 
         # --- Prozess-LEDs
-        watched = {int(n): b["led"].get("process", "").lower()
-                   for n, b in buttons.items()
-                   if b.get("led", {}).get("mode") == "process"}
         if watched:
-            running = {p.info["name"].lower()
-                       for p in psutil.process_iter(["name"]) if p.info["name"]}
             for note, proc in watched.items():
                 state = 1 if proc and proc in running else 0
                 if self._last.get(note) != state:
@@ -1110,6 +1154,9 @@ class App:
             activeforeground="white", relief="flat", padx=14, pady=2,
             command=self._toggle_pause)
         self.pause_btn.pack(side="left", padx=16)
+
+        ttk.Button(top, text="MIDI-Freigabe …",
+                   command=self._open_release_dialog).pack(side="left")
 
         self.autostart_var = tk.BooleanVar(value=autostart_enabled())
         ttk.Checkbutton(
@@ -1707,6 +1754,76 @@ class App:
         note_var.set(f"MIDI-Note: {note}")
         self._log("info", f"[MC] Position neu gelernt: Note {note}")
 
+    # --------------------------------------------------------- MIDI-Freigabe
+
+    def _open_release_dialog(self):
+        win = self._dialog("MIDI-Freigabe für andere Programme")
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=(
+            "Solange eines dieser Programme läuft, gibt Midi2Sonar den\n"
+            "X-Touch Mini komplett frei (Windows erlaubt nur einem Programm\n"
+            "den MIDI-Zugriff). Das Programm kann den Controller dann direkt\n"
+            "benutzen. Wird es beendet, übernimmt Midi2Sonar automatisch wieder.\n"
+            "Geprüft wird alle 2 Sekunden."),
+            justify="left").pack(anchor="w", pady=(0, 8))
+
+        listbox = tk.Listbox(frame, height=6, width=44)
+        listbox.pack(anchor="w")
+
+        def refresh_list():
+            listbox.delete(0, "end")
+            for a in self.cfg.get("release_apps", []):
+                listbox.insert("end", a)
+        refresh_list()
+
+        addrow = ttk.Frame(frame)
+        addrow.pack(anchor="w", pady=(8, 0))
+        proc_var = tk.StringVar()
+        proc_combo = ttk.Combobox(addrow, textvariable=proc_var, width=30)
+        proc_combo.pack(side="left")
+
+        def fill_procs():
+            proc_combo.configure(values=list_processes())
+        ttk.Button(addrow, text="↻", width=3, command=fill_procs).pack(side="left", padx=2)
+        fill_procs()
+
+        def add():
+            name = proc_var.get().strip()
+            if not name:
+                return
+            with self.bridge.lock:
+                apps = self.cfg.setdefault("release_apps", [])
+                if name.lower() not in (a.lower() for a in apps):
+                    apps.append(name)
+            save_config(self.cfg)
+            proc_var.set("")
+            refresh_list()
+            self._log("info", f"MIDI-Freigabe: {name} hinzugefügt")
+
+        def remove():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            name = listbox.get(sel[0])
+            with self.bridge.lock:
+                self.cfg["release_apps"] = [
+                    a for a in self.cfg.get("release_apps", []) if a != name]
+            save_config(self.cfg)
+            refresh_list()
+            self._log("info", f"MIDI-Freigabe: {name} entfernt")
+
+        ttk.Button(addrow, text="Hinzufügen", command=add).pack(side="left", padx=4)
+        ttk.Button(addrow, text="Entfernen", command=remove).pack(side="left")
+
+        ttk.Label(frame, text="(Liste über ↻ = laufende Programme; Name lässt sich"
+                              " auch von Hand eintragen, z. B. ableton live 12.exe)",
+                  foreground="#777").pack(anchor="w", pady=(4, 0))
+
+        ttk.Button(frame, text="Schließen", command=win.destroy
+                   ).pack(anchor="e", pady=(10, 0))
+
     # ------------------------------------------------------------ Play/Pause
 
     def _toggle_pause(self):
@@ -1751,7 +1868,10 @@ class App:
                     self._on_learn(payload[0])
         except queue.Empty:
             pass
-        if self.bridge.connected:
+        if self.bridge.released:
+            app = self.bridge.release_for or "…"
+            self.status_var.set(f"◌ MIDI freigegeben für {app}")
+        elif self.bridge.connected:
             mode = "MC-Modus" if self.bridge.hw_mode == "mc" else "Standard-Modus"
             self.status_var.set(f"● Verbunden ({mode})")
         else:

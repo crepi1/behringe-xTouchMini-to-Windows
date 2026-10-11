@@ -53,6 +53,12 @@ Die App erkennt den Modus automatisch an den MIDI-Nachrichten.
   (z. B. LED an, solange `obs64.exe` läuft).
 - **Play/Pause-Schalter**: pausiert alle MIDI-Aktionen temporär; beim Start
   immer aktiv.
+- **MIDI-Freigabe für DAWs** (Button „MIDI-Freigabe …"): Solange ein
+  eingetragenes Programm läuft (z. B. Ableton Live, AmpliTube 5), schließt
+  Midi2Sonar seine MIDI-Verbindung komplett und mischt sich nicht ein —
+  das Programm kann den X-Touch Mini direkt benutzen. Wird es beendet,
+  übernimmt Midi2Sonar innerhalb weniger Sekunden automatisch wieder
+  (geprüft alle 2 s). Statuszeile zeigt „◌ MIDI freigegeben für …".
 - **Autostart**-Checkbox — startet die App beim Windows-Start **minimiert im
   Tray** (`--minimized`).
 - **Tray-Icon**: Fenster schließen = minimieren ins Tray; „Beenden" über das
@@ -97,6 +103,7 @@ Wird von der GUI gepflegt; ältere Formate werden automatisch migriert.
 ```json
 {
   "midi_port": "X-TOUCH MINI",
+  "release_apps": ["Ableton Live 12 Suite.exe", "AmpliTube 5.exe"],
   "layers": {
     "A": {
       "fader": { "mode": "windows" },
@@ -129,6 +136,8 @@ Wird von der GUI gepflegt; ältere Formate werden automatisch migriert.
   Kürzel als String (`"strg+c"`).
 - LED-`mode`: `off`, `on`, `blink`, `process` (+ `process`).
 - `mc.notes`: gezeichnete Position → MIDI-Note (per „Lernen" gepflegt).
+- `release_apps`: Prozessnamen, bei denen Midi2Sonar das MIDI-Gerät freigibt
+  (GUI: Button „MIDI-Freigabe …", Groß-/Kleinschreibung egal).
 
 ## MIDI-Referenz (empirisch verifiziert)
 
@@ -163,6 +172,14 @@ Windows-Eigenheit: MIDI-**Eingang** heißt z. B. `X-TOUCH MINI 0`, der
 **Ausgang** `X-TOUCH MINI 1` — beide werden getrennt per Teilstring gesucht.
 Abgezogene Geräte meldet Windows nicht; die App pollt deshalb nicht-blockierend
 und prüft alle 2 s die Portliste (Auto-Reconnect).
+
+Hinweis zu neueren Windows-11-Builds: Mit dem Windows-MIDI-Dienst (`midisrv`,
+Windows MIDI Services) sind MIDI-Geräte **multi-client** — mehrere Programme
+können sie gleichzeitig öffnen. Eine DAW würde den Controller also auch ohne
+Freigabe sehen, aber dann reagieren DAW **und** Midi2Sonar gleichzeitig
+(doppelte Aktionen, LED-/Ring-Konflikte). Die MIDI-Freigabe verhindert genau
+das — und auf älteren Systemen ohne `midisrv` (exklusive Ports) ist sie sogar
+zwingend nötig, damit die DAW das Gerät überhaupt öffnen kann.
 
 ## Exe selbst bauen
 
